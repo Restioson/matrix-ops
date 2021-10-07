@@ -1,223 +1,208 @@
-use std::str::FromStr;
+use std::fmt::{Debug, Display, Formatter};
+use std::io::{stdin, stdout, Write};
 use fraction::{Fraction, Zero};
 use ndarray::Array2;
 use pest_derive::Parser;
 use pest::Parser;
-use pest::iterators::{Pairs};
+use pest::iterators::{Pair, Pairs};
+use pest::prec_climber::{Assoc, Operator, PrecClimber};
+
+type Result<T> = ::std::result::Result<T, MathError>;
+type Number = Fraction;
 
 #[derive(Parser)]
 #[grammar = "grammar.pest"]
-struct MyParser;
+struct MatrixOpsParser;
 
-const OPERATIONS: &str = "
-R2 - 3R1 => R2;
-R3 - 2R1 => R3;
-R4 - R1 => R4;
 
-R4 - R2 => R4;
-R2 / 4 => R2;
-R3 - 3R2 => R3;
-R3 / (7/4) => R3;
-R4 - 6R3 => R4;
-R3 + 6R4 => R3;
-R4 / (-1/7) => R4;
-R2 + (5/4)R3 + (6/4)R4 => R2;
-R1 + R2 - 2R3 - 2R4 => R1;
-";
+fn main() -> Result<()> {
+    let climber = PrecClimber::new(vec![
+        Operator::new(Rule::plus, Assoc::Left) | Operator::new(Rule::minus, Assoc::Left),
+        Operator::new(Rule::mul, Assoc::Left) | Operator::new(Rule::div, Assoc::Left),
+    ]);
 
-const MATRIX: &str = "
-1, -1, 2, 2, +0;
-3, +1, 1, 0, +2;
-2, +1, 2, 1, -4;
-1, +3, 3, 1, +3;
-";
+    let mut input = String::new();
 
-fn main() {
-    let mut matrix = match MyParser::parse(Rule::matrix_dims, "4x5") {
-        Ok(mut parsed) => {
-            let mut dims = parsed.next().unwrap().into_inner();
-            let mut next = || dims.next().unwrap().as_str().parse().unwrap();
-            let (rows, cols): (usize, usize) = (next(), next());
-            Array2::<Fraction>::zeros((rows, cols))
-        }
-        Err(e) => panic!("{}", e),
+    let mut matrix = {
+        print!("Enter matrix dimensions (e.g 3x5): ");
+        stdout().flush().unwrap();
+        stdin().read_line(&mut input).unwrap();
+        let mut parsed = MatrixOpsParser::parse(Rule::matrix_dims, &input).map_err(MathError::InvalidDimensions)?;
+        let mut dims = parsed.next().unwrap().into_inner();
+        let mut next = || dims.next().unwrap().as_str().parse().unwrap();
+        let (rows, cols): (usize, usize) = (next(), next());
+        Array2::<Number>::zeros((rows, cols))
     };
 
-    match MyParser::parse(Rule::matrix, MATRIX) {
-        Ok(mut parsed) => {
-            let pairs = parsed.next().unwrap().into_inner();
-            let mut num = 0;
+    println!("Enter matrix lines (each line e.g `1, -1, 2, +2, +0`):");
 
-            for (idx, item) in pairs.enumerate() {
-                if item.as_rule() == Rule::EOI {
-                    break;
-                }
+    let mut row = 0;
+    let mut num_elems = 0;
 
-                num += 1;
-                let val = evaluate_constant_operation(item.into_inner());
+    while row < matrix.dim().0 {
+        print!("> ");
+        stdout().flush().unwrap();
+        input.clear();
+        stdin().read_line(&mut input).unwrap();
 
-                let row = idx / matrix.dim().1;
-                let col = idx % matrix.dim().1;
-
-                matrix[(row, col)] = val;
+        let mut parsed = match MatrixOpsParser::parse(Rule::matrix_row, &input) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Error parsing line:\n{}", e);
+                continue;
             }
-
-            if num != (matrix.dim().0 * matrix.dim().1) {
-                panic!("Invalid matrix form");
-            }
-        }
-        Err(e) => panic!("{}", e),
-    };
-
-    println!("Matrix:\n{}\n", matrix);
-
-    match MyParser::parse(Rule::stmt, OPERATIONS) {
-        Ok(parsed) => {
-            for op in parsed {
-                visit_row_ops(&mut matrix,op.into_inner())
-            }
-        }
-        Err(e) => panic!("{}", e),
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-enum ConstantOperator {
-    Add,
-    Sub,
-    Mul,
-    Div,
-}
-
-impl FromStr for ConstantOperator {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        use ConstantOperator::*;
-
-        Ok(match s {
-            "+" => Add,
-            "-" => Sub,
-            "*" => Mul,
-            "/" => Div,
-            _ => return Err(()),
-        })
-    }
-}
-
-impl ConstantOperator {
-    fn apply(self, a: Fraction, b: Fraction) -> Fraction {
-        use ConstantOperator::*;
-
-        match self {
-            Add => a + b,
-            Sub => a - b,
-            Mul => a * b,
-            Div => a / b,
-        }
-    }
-}
-
-#[derive(Copy, Clone)]
-enum RowAndRowOperator {
-    Add,
-    Sub,
-}
-
-impl FromStr for RowAndRowOperator {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        use RowAndRowOperator::*;
-
-        Ok(match s {
-            "+" => Add,
-            "-" => Sub,
-            _ => return Err(()),
-        })
-    }
-}
-
-impl RowAndRowOperator {
-    fn apply(self, a: Vec<Fraction>, b: Vec<Fraction>) -> Vec<Fraction> {
-        use RowAndRowOperator::*;
-
-        let func = match self {
-            Add => |(a, b)| a + b,
-            Sub => |(a, b)| a - b,
         };
 
-        a.into_iter().zip(b).map(func).collect()
+        let pairs = parsed.next().unwrap().into_inner();
+
+        for (col, item) in pairs.enumerate() {
+            if item.as_rule() == Rule::EOI {
+                break;
+            }
+
+            num_elems += 1;
+
+            matrix[(row, col)] = evaluate_constant_operation(&climber, item.into_inner())?;
+        }
+
+        row += 1;
     }
-}
 
-fn evaluate_constant_operation(mut pairs: Pairs<'_, Rule>) -> Fraction {
-    let first = pairs.next().unwrap();
+    if num_elems != (matrix.dim().0 * matrix.dim().1) {
+        return Err(MathError::WrongNumberValues);
+    }
 
-    let mut acc = evaluate_constant_operand(first.into_inner());
+    println!("Welcome to the evaluation console!");
+    println!("Try an expression like: 4R1 + R2 / (2 * 3 / 4) => R1");
 
-    while pairs.peek().is_some() {
-        let op = pairs.next();
-        let second = pairs.next();
+    loop {
+        print!(">");
+        stdout().flush().unwrap();
+        input.clear();
+        stdin().read_line(&mut input).unwrap();
+        let parsed = match MatrixOpsParser::parse(Rule::stmt, &input) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Error parsing statement:\n{}", e);
+                continue;
+            }
+        };
 
-        match (op, second) {
-            (Some(op), Some(second)) => {
-                let op: ConstantOperator = op.as_str().parse().unwrap();
-                let second = evaluate_constant_operand(second.into_inner());
-                acc = op.apply(acc, second);
-            },
-            _ => return acc,
+        for op in parsed {
+            visit_row_ops(&climber, &mut matrix,op.into_inner());
         }
     }
-
-    acc
 }
 
-fn evaluate_constant_operand(pairs: Pairs<'_, Rule>) -> Fraction {
+enum MathError {
+    MainRowCoefficientZero,
+    MainRowNotMentioned,
+    DivByZero,
+    InvalidDecimal(fraction::error::ParseError),
+    InvalidDimensions(pest::error::Error<Rule>),
+    WrongNumberValues,
+}
+
+impl Debug for MathError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+impl Display for MathError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        use MathError::*;
+
+        let mut p = |s| f.write_str(s);
+
+        match self {
+            MainRowCoefficientZero => p("The coefficient of the row of the operation cannot be 0"),
+            MainRowNotMentioned => p("The row of the operation is not mentioned on the LHS"),
+            DivByZero => p("Division by zero"),
+            InvalidDecimal(e) => write!(f, "Invalid decimal format:{}", e),
+            InvalidDimensions(e) => write!(f, "Invalid matrix dimensions:\n{}", e),
+            WrongNumberValues => p("Invalid matrix form: values do not fit dimensions")
+        }
+    }
+}
+
+fn evaluate_constant_operation(climber: &PrecClimber<Rule>, pairs: Pairs<'_, Rule>) -> Result<Number> {
+    let primary = |pair: Pair<'_, Rule>| {
+        evaluate_constant_operand(climber, pair.into_inner())
+    };
+
+    let infix = |lhs: Result<Number>, op: Pair<Rule>, rhs: Result<Number>| {
+        let (lhs, rhs) = (lhs?, rhs?);
+
+        let res = match op.as_rule() {
+            Rule::plus => lhs + rhs,
+            Rule::minus => lhs - rhs,
+            Rule::mul => lhs * rhs,
+            Rule::div => if !rhs.is_zero() {
+                lhs / rhs
+            } else {
+                return Err(MathError::DivByZero);
+            },
+            _ => unreachable!()
+        };
+
+        Ok(res)
+    };
+
+    climber.climb(pairs, primary, infix)
+}
+
+fn evaluate_constant_operand(climber: &PrecClimber<Rule>, pairs: Pairs<'_, Rule>) -> Result<Fraction> {
     let inner = pairs.into_iter().next().unwrap();
 
     if inner.as_rule() == Rule::constant {
-        Fraction::from_decimal_str(inner.as_str()).unwrap()
+        Number::from_decimal_str(inner.as_str()).map_err(MathError::InvalidDecimal)
     } else {
-        evaluate_constant_operation(inner.into_inner())
+        evaluate_constant_operation(climber, inner.into_inner())
     }
 }
 
-fn visit_row_ops(matrix: &mut Array2<Fraction>, pairs: Pairs<'_, Rule>) {
+fn visit_row_ops(climber: &PrecClimber<Rule>, matrix: &mut Array2<Number>, pairs: Pairs<'_, Rule>) {
     for (step, op) in pairs.enumerate() {
         if op.as_rule() == Rule::row_operation {
             println!("Step {}: evaluating operation: {}", step + 1, op.as_str());
-            evaluate_row_operation(matrix, op.into_inner());
+
+            if let Err(e) = evaluate_row_operation(climber, matrix, op.into_inner()) {
+                eprintln!("{}", e);
+            }
 
             println!("{}\n", matrix);
         }
     }
 }
 
-fn evaluate_row_operation(matrix: &mut Array2<Fraction>, mut pairs: Pairs<'_, Rule>) {
+fn evaluate_row_operation(
+    climber: &PrecClimber<Rule>,
+    matrix: &mut Array2<Number>,
+    mut pairs: Pairs<'_, Rule>
+) -> Result<()> {
     let row_expr = pairs.next().unwrap();
     let store_to_row = pairs.next().unwrap().as_str();
     let row_idx = store_to_row[1..].parse::<usize>().unwrap() - 1;
 
-    let (mentions_row, vals) = evaluate_row_expression(&matrix, store_to_row, row_expr.into_inner());
-
-    if !mentions_row {
-        panic!("Does not mention row being stored into!");
-    }
+    let vals = evaluate_row_expression(climber, &matrix, store_to_row, row_expr.into_inner())?;
 
     for (col, val) in vals.into_iter().enumerate() {
         matrix[(row_idx, col)] = val;
     }
+
+    Ok(())
 }
 
 fn evaluate_row_expression(
-    matrix: &Array2<Fraction>,
-    test_mentions_row: &str,
+    climber: &PrecClimber<Rule>,
+    matrix: &Array2<Number>,
+    main_row: &str,
     mut pairs: Pairs<'_, Rule>
-) -> (bool, Vec<Fraction>) {
-    let (name, mut acc) = evaluate_row_with_coefficient(matrix, pairs.next().unwrap().into_inner());
+) -> Result<Vec<Number>> {
+    let (name, mut acc) = evaluate_row_with_coefficient(climber, main_row, matrix, pairs.next().unwrap().into_inner())?;
 
-    let mut mentions_row = name == test_mentions_row;
+    let mut mentions_main_row = name == main_row;
 
     while pairs.peek().is_some() {
         let op = pairs.next();
@@ -225,56 +210,68 @@ fn evaluate_row_expression(
 
         match (op, second) {
             (Some(op), Some(second)) if second.as_rule() == Rule::row_with_coefficient => {
-                let op: RowAndRowOperator = op.as_str().parse().unwrap();
-                let (name, second) = evaluate_row_with_coefficient(matrix, second.into_inner());
+                let (name, second) = evaluate_row_with_coefficient(climber, main_row, matrix, second.into_inner())?;
 
-                if name == test_mentions_row {
-                    mentions_row = true;
+                let elementwise_fn = match op.as_rule() {
+                    Rule::plus => |(a, b)| a + b,
+                    Rule::minus => |(a, b)| a - b,
+                    other => unreachable!("{:?}", other),
+                };
+
+                if name == main_row {
+                    mentions_main_row = true;
                 }
 
-                acc = op.apply(acc, second);
+                acc = acc.into_iter().zip(second).map(elementwise_fn).collect();
             },
-            _ => return (mentions_row, acc),
+            (None, None) => break,
+            other => unreachable!("{:?}", other),
         }
     }
 
-    (mentions_row, acc)
+    if !mentions_main_row {
+        Err(MathError::MainRowNotMentioned)
+    } else {
+        Ok(acc)
+    }
 }
 
 fn evaluate_row_with_coefficient<'a>(
-    matrix: &Array2<Fraction>,
+    climber: &PrecClimber<Rule>,
+    main_row: &str,
+    matrix: &Array2<Number>,
     pairs: Pairs<'a, Rule>
-) -> (&'a str, Vec<Fraction>) {
-    let mut coeff = Fraction::from(1);
+) -> Result<(&'a str, Vec<Number>)> {
+    let mut coeff = Number::from(1);
     let mut coeff_is_inv = false;
     let mut row_name = None;
 
     for pair in pairs {
         if pair.as_rule() == Rule::row {
             row_name = Some(pair.as_str());
-        } else if pair.as_rule() == Rule::row_and_constant_operator {
-            if pair.as_str() == "/" {
-                coeff_is_inv = true;
-            }
+        } else if pair.as_rule() == Rule::div {
+            coeff_is_inv = true;
         } else if pair.as_rule() == Rule::constant_operation {
-            coeff = evaluate_constant_operation(pair.into_inner())
+            coeff = evaluate_constant_operation(climber, pair.into_inner())?;
         } else if pair.as_rule() == Rule::constant_operand {
-            coeff = evaluate_constant_operand(pair.into_inner())
+            coeff = evaluate_constant_operand(climber, pair.into_inner())?;
         };
     }
 
     let row_name = row_name.unwrap();
 
-    if coeff.is_zero() {
-        panic!("Coefficient is zero");
+    if coeff.is_zero() && row_name == main_row {
+        return Err(MathError::MainRowCoefficientZero);
+    }
+
+    if coeff_is_inv && coeff.is_zero() {
+        return Err(MathError::DivByZero);
     }
 
     if coeff_is_inv {
         coeff = coeff.recip()
-    };
+    }
 
     let row_view = matrix.row(row_name[1..].parse::<usize>().unwrap() - 1);
-    let row = row_view.into_iter().map(|it| it * &coeff).collect();
-
-    (row_name, row)
+    Ok((row_name, row_view.into_iter().map(|it| it * &coeff).collect()))
 }
