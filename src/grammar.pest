@@ -1,0 +1,19 @@
+WHITESPACE = _{ WHITE_SPACE | NEWLINE }
+COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//") ~ ANY* ~ NEWLINE }
+
+sign = { "-" | "+" }
+constant = @{ sign? ~ (ASCII_DIGIT | "_")+ }
+constant_operator = @{ "+" | "-" | "/" | "*" }
+constant_operand = { constant | ("(" ~ constant_operation ~ ")")}
+constant_operation = { constant_operand ~ (constant_operator ~ constant_operand)* }
+
+row = { (ASCII_ALPHA_UPPER)+ ~ ASCII_DIGIT }
+row_and_row_operator = { "+" | "-" }
+row_and_constant_operator = { "*" | "/" }
+row_with_coefficient = { (row ~ row_and_constant_operator ~ constant_operation) | (constant_operand ~ row) | row }
+row_expression = { row_with_coefficient ~ (row_and_row_operator ~ row_with_coefficient)* }
+row_operation = { row_expression ~ "=>" ~ row }
+stmt = { SOI ~ row_operation ~ ((";" ~ row_operation)* ~ ";")? ~ EOI }
+
+matrix_dims = { SOI ~ constant ~ "x" ~ constant ~ EOI }
+matrix = { SOI ~ ((constant_operation ~ ",")* ~ (constant_operation ~ ";"))+ ~ EOI}
